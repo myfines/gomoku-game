@@ -37,6 +37,27 @@ test('四子不误判获胜，电脑会挡住玩家在边缘的一步成五', ()
   assert.deepEqual(chooseAiMove(game), [14, 0]);
 });
 
+test('AI 会在边缘选择立即获胜的落点', () => {
+  const game = createGame(1);
+  for (let x = 10; x <= 13; x++) { game.grid[14][x] = 2; game.history.push([x, 14, 2]); }
+  game.toMove = 2;
+  const move = chooseAiMove(game);
+  assert.ok(move[1] === 14 && (move[0] === 9 || move[0] === 14));
+  const copy = game.grid.map(row => row.slice());
+  copy[move[1]][move[0]] = 2;
+  assert.equal(hasFive({ size: 15, grid: copy }, move[0], move[1], 2), true);
+});
+
+test('多层搜索不修改真实棋盘，优先延伸自己的活三', () => {
+  const game = createGame(1);
+  for (let x = 5; x <= 7; x++) { game.grid[7][x] = 2; game.history.push([x, 7, 2]); }
+  game.toMove = 2;
+  const before = game.grid.map(row => row.slice());
+  const move = chooseAiMove(game);
+  assert.ok((move[0] === 4 || move[0] === 8) && move[1] === 7);
+  assert.deepEqual(game.grid, before);
+});
+
 test('AI 开局模式悔棋撤销完整回合，但保留电脑的先手棋', () => {
   const game = createGame(2);
   playMove(game, 7, 8);

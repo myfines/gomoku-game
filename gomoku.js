@@ -24,21 +24,6 @@
     return Number.isInteger(x) && Number.isInteger(y) && x >= 0 && x < game.size && y >= 0 && y < game.size;
   }
 
-  function hasFive(game, x, y, color) {
-    if (!inBounds(game, x, y) || game.grid[y][x] !== color) return false;
-    for (const [dx, dy] of AXES) {
-      let count = 1;
-      for (const direction of [-1, 1]) {
-        let cx = x + dx * direction, cy = y + dy * direction;
-        while (inBounds(game, cx, cy) && game.grid[cy][cx] === color) {
-          count++; cx += dx * direction; cy += dy * direction;
-        }
-      }
-      if (count >= 5) return true;
-    }
-    return false;
-  }
-
   function playMove(game, x, y) {
     if (game.over || !inBounds(game, x, y) || game.grid[y][x] !== 0) return false;
     const color = game.toMove;
@@ -59,54 +44,131 @@
     return true;
   }
 
-  function scoreMove(game, x, y, color) {
-    let total = 0;
+  const WIN_SCORE = 1_000_000_000;
+  const WINDOW_SCORE = [0, 2, 14, 180, 22_000, 0];
+
+  function hasFiveGrid(grid, x, y, color) {
+    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= SIZE || y < 0 || y >= SIZE || grid[y][x] !== color) return false;
     for (const [dx, dy] of AXES) {
-      let stones = 1, open = 0;
+      let count = 1;
       for (const direction of [-1, 1]) {
         let cx = x + dx * direction, cy = y + dy * direction;
-        while (inBounds(game, cx, cy) && game.grid[cy][cx] === color) {
-          stones++; cx += dx * direction; cy += dy * direction;
+        while (cx >= 0 && cx < SIZE && cy >= 0 && cy < SIZE && grid[cy][cx] === color) {
+          count++; cx += dx * direction; cy += dy * direction;
         }
-        if (inBounds(game, cx, cy) && game.grid[cy][cx] === 0) open++;
       }
-      total += stones >= 5 ? 1_000_000 : stones === 4 && open === 2 ? 20_000 : stones === 4 && open === 1 ? 5_000 : stones === 3 && open === 2 ? 1_200 : stones === 3 && open === 1 ? 220 : stones === 2 && open === 2 ? 100 : stones === 2 && open === 1 ? 20 : 1;
+      if (count >= 5) return true;
     }
-    return total;
+    return false;
+  }
+
+  function hasFive(game, x, y, color) {
+    return inBounds(game, x, y) && hasFiveGrid(game.grid, x, y, color);
+  }
+
+  function scoreWindow(grid, startX, startY, dx, dy, color) {
+    let own = 0, blocked = false;
+    for (let i = 0; i < 5; i++) {
+      const cell = grid[startY + dy * i][startX + dx * i];
+      if (cell === 3 - color) { blocked = true; break; }
+      if (cell === color) own++;
+    }
+    return blocked || own === 0 ? 0 : own === 5 ? WIN_SCORE : WINDOW_SCORE[own];
+  }
+
+  function evaluateBoard(grid, color) {
+    let score = 0;
+    for (const [dx, dy] of AXES) {
+      for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+        const endX = x + dx * 4, endY = y + dy * 4;
+        if (endX < 0 || endX >= SIZE || endY < 0 || endY >= SIZE) continue;
+        score += scoreWindow(grid, x, y, dx, dy, color);
+        score -= scoreWindow(grid, x, y, dx, dy, 3 - color);
+      }
+    }
+    return score;
+  }
+
+  function scoreMove(grid, x, y, color) {
+    grid[y][x] = color;
+    if (hasFiveGrid(grid, x, y, color)) { grid[y][x] = 0; return WIN_SCORE; }
+    let score = 0;
+    for (const [dx, dy] of AXES) for (let offset = -4; offset <= 0; offset++) {
+      const sx = x + dx * offset, sy = y + dy * offset;
+      const endX = sx + dx * 4, endY = sy + dy * 4;
+      if (sx < 0 || sx >= SIZE || sy < 0 || sy >= SIZE || endX < 0 || endX >= SIZE || endY < 0 || endY >= SIZE) continue;
+      score += scoreWindow(grid, sx, sy, dx, dy, color);
+    }
+    grid[y][x] = 0;
+    return score;
+  }
+
+  function generateCandidates(grid, color, limit) {
+    const occupied = [];
+    for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) if (grid[y][x] !== 0) occupied.push([x, y]);
+    if (!occupied.length) return [[7, 7]];
+    const candidates = new Set();
+    for (const [x, y] of occupied) for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const cx = x + dx, cy = y + dy;
+      if (cx >= 0 && cx < SIZE && cy >= 0 && cy < SIZE && grid[cy][cx] === 0) candidates.add(`${cx},${cy}`);
+    }
+    const ranked = [...candidates].map(key => {
+      const [x, y] = key.split(',').map(Number);
+      const attack = scoreMove(grid, x, y, color);
+      const defense = scoreMove(grid, x, y, 3 - color);
+      const centerBias = (SIZE - Math.abs(7 - x) - Math.abs(7 - y)) * 0.01;
+      return { move: [x, y], score: attack + defense * 0.96 + centerBias };
+    });
+    ranked.sort((a, b) => b.score - a.score || a.move[1] - b.move[1] || a.move[0] - b.move[0]);
+    if (ranked.length) return ranked.slice(0, limit).map(item => item.move);
+    let nearest = null, distance = Infinity;
+    for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) if (grid[y][x] === 0) {
+      const d = Math.abs(7 - x) + Math.abs(7 - y);
+      if (d < distance) { nearest = [x, y]; distance = d; }
+    }
+    return nearest ? [nearest] : [];
+  }
+
+  function search(grid, color, depth, alpha, beta, lastMove, ply) {
+    if (lastMove && hasFiveGrid(grid, lastMove[0], lastMove[1], 3 - color)) return -WIN_SCORE + ply;
+    if (depth === 0) return evaluateBoard(grid, color);
+    const moves = generateCandidates(grid, color, 8);
+    if (!moves.length) return 0;
+    let best = -Infinity;
+    for (const [x, y] of moves) {
+      grid[y][x] = color;
+      const score = -search(grid, 3 - color, depth - 1, -beta, -alpha, [x, y], ply + 1);
+      grid[y][x] = 0;
+      if (score > best) best = score;
+      if (score > alpha) alpha = score;
+      if (alpha >= beta) break;
+    }
+    return best;
   }
 
   function chooseAiMove(game) {
     if (game.over) return null;
     const aiColor = 3 - game.userColor;
-    const opponent = game.userColor;
-    const candidates = new Set();
-    if (!game.history.length) return [7, 7];
-    for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) if (game.grid[y][x] !== 0) {
-      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-        const cx = x + dx, cy = y + dy;
-        if (inBounds(game, cx, cy) && game.grid[cy][cx] === 0) candidates.add(`${cx},${cy}`);
-      }
+    const grid = game.grid.map(row => row.slice());
+    if (!grid.some(row => row.some(cell => cell !== 0))) return [7, 7];
+    const candidates = generateCandidates(grid, aiColor, 12);
+    for (const [x, y] of candidates) {
+      grid[y][x] = aiColor;
+      const wins = hasFiveGrid(grid, x, y, aiColor);
+      grid[y][x] = 0;
+      if (wins) return [x, y];
     }
-    let best = null, bestScore = -Infinity;
-    for (const key of candidates) {
-      const [x, y] = key.split(',').map(Number);
-      game.grid[y][x] = aiColor;
-      const attack = hasFive(game, x, y, aiColor) ? 1_000_000 : scoreMove(game, x, y, aiColor);
-      game.grid[y][x] = opponent;
-      const defense = hasFive(game, x, y, opponent) ? 1_000_000 : scoreMove(game, x, y, opponent);
-      game.grid[y][x] = 0;
-      const score = attack * 1.03 + defense + (SIZE - Math.abs(7 - x) - Math.abs(7 - y)) * 0.01;
+    const opponentWins = candidates.filter(([x, y]) => scoreMove(grid, x, y, game.userColor) === WIN_SCORE);
+    if (opponentWins.length === 1) return opponentWins[0];
+    let best = candidates[0] || null, bestScore = -Infinity;
+    for (const [x, y] of candidates) {
+      grid[y][x] = aiColor;
+      const score = -search(grid, game.userColor, 2, -Infinity, Infinity, [x, y], 1);
+      grid[y][x] = 0;
       if (score > bestScore) { best = [x, y]; bestScore = score; }
     }
-    if (best) return best;
-    let nearest = null, distance = Infinity;
-    for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) if (game.grid[y][x] === 0) {
-      const d = Math.abs(7 - x) + Math.abs(7 - y);
-      if (d < distance) { nearest = [x, y]; distance = d; }
-    }
-    return nearest;
+    return best;
   }
-
   function undoTurn(game) {
     const openingLength = game.userColor === 2 ? 1 : 0;
     if (game.history.length <= openingLength) return false;
@@ -226,5 +288,7 @@
 
   return { SIZE, createGame, hasFive, playMove, chooseAiMove, undoTurn, mount };
 });
+
+
 
 
