@@ -58,6 +58,17 @@ test('多层搜索不修改真实棋盘，优先延伸自己的活三', () => {
   assert.deepEqual(game.grid, before);
 });
 
+test('搜索预算耗尽时回退到合法着法且不污染棋盘', () => {
+  const game = createGame(1);
+  for (let x = 5; x <= 7; x++) { game.grid[7][x] = 2; game.history.push([x, 7, 2]); }
+  game.toMove = 2;
+  const before = game.grid.map(row => row.slice());
+  const move = chooseAiMove(game, { timeBudgetMs: 10, nodeLimit: 500 });
+  assert.ok(move && move.every(value => Number.isInteger(value) && value >= 0 && value < 15));
+  assert.equal(game.grid[move[1]][move[0]], 0);
+  assert.deepEqual(game.grid, before);
+});
+
 test('AI 开局模式悔棋撤销完整回合，但保留电脑的先手棋', () => {
   const game = createGame(2);
   playMove(game, 7, 8);

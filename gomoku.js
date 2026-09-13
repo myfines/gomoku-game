@@ -129,29 +129,84 @@
     return nearest ? [nearest] : [];
   }
 
-  function search(grid, color, depth, alpha, beta, lastMove, ply) {
+  function positionKey(grid, color) {
+    return `${color}:${grid.map(row => row.join('')).join('')}`;
+  }
+
+  function normalizeMateScore(score, ply, toTable) {
+    if (score > WIN_SCORE - 100_000) return toTable ? score + ply : score - ply;
+    if (score < -WIN_SCORE + 100_000) return toTable ? score - ply : score + ply;
+    return score;
+  }
+
+  function winningMoves(grid, color) {
+    return generateCandidates(grid, color, 12).filter(([x, y]) => scoreMove(grid, x, y, color) === WIN_SCORE);
+  }
+
+  function quiescence(grid, color, alpha, beta, lastMove, ply, qDepth) {
     if (lastMove && hasFiveGrid(grid, lastMove[0], lastMove[1], 3 - color)) return -WIN_SCORE + ply;
-    if (depth === 0) return evaluateBoard(grid, color);
-    const moves = generateCandidates(grid, color, 8);
+    const wins = winningMoves(grid, color);
+    if (wins.length) return WIN_SCORE - ply - 1;
+    const threats = winningMoves(grid, 3 - color);
+    if (!threats.length) return evaluateBoard(grid, color);
+    if (qDepth <= 0 || threats.length !== 1) return -WIN_SCORE + ply + 1;
+    const [x, y] = threats[0];
+    grid[y][x] = color;
+    const score = hasFiveGrid(grid, x, y, color)
+      ? WIN_SCORE - ply - 1
+      : -quiescence(grid, 3 - color, -beta, -alpha, [x, y], ply + 1, qDepth - 1);
+    grid[y][x] = 0;
+    return score;
+  }
+
+  function search(grid, color, depth, alpha, beta, lastMove, ply, context) {
+    context.nodes++;
+    if (context.nodes >= context.nodeLimit || (context.nodes % 64 === 0 && Date.now() >= context.deadline)) {
+      context.aborted = true;
+      return evaluateBoard(grid, color);
+    }
+    if (lastMove && hasFiveGrid(grid, lastMove[0], lastMove[1], 3 - color)) return -WIN_SCORE + ply;
+    if (depth === 0) return quiescence(grid, color, alpha, beta, lastMove, ply, 3);
+
+    const key = positionKey(grid, color), alphaStart = alpha, betaStart = beta;
+    const cached = context.table.get(key);
+    if (cached && cached.depth >= depth) {
+      const cachedScore = normalizeMateScore(cached.score, ply, false);
+      if (cached.bound === 'exact') return cachedScore;
+      if (cached.bound === 'lower') alpha = Math.max(alpha, cachedScore);
+      else if (cached.bound === 'upper') beta = Math.min(beta, cachedScore);
+      if (alpha >= beta) return cachedScore;
+    }
+
+    const moves = generateCandidates(grid, color, 7);
     if (!moves.length) return 0;
-    let best = -Infinity;
+    const preferred = cached?.bestMove;
+    if (preferred) {
+      const index = moves.findIndex(([x, y]) => x === preferred[0] && y === preferred[1]);
+      if (index > 0) moves.unshift(...moves.splice(index, 1));
+    }
+    let best = -Infinity, bestMove = null;
     for (const [x, y] of moves) {
       grid[y][x] = color;
-      const score = -search(grid, 3 - color, depth - 1, -beta, -alpha, [x, y], ply + 1);
+      const score = -search(grid, 3 - color, depth - 1, -beta, -alpha, [x, y], ply + 1, context);
       grid[y][x] = 0;
-      if (score > best) best = score;
+      if (context.aborted) return evaluateBoard(grid, color);
+      if (score > best) { best = score; bestMove = [x, y]; }
       if (score > alpha) alpha = score;
       if (alpha >= beta) break;
     }
+    const bound = best <= alphaStart ? 'upper' : best >= betaStart ? 'lower' : 'exact';
+    context.table.set(key, { depth, score: normalizeMateScore(best, ply, true), bound, bestMove });
     return best;
   }
 
-  function chooseAiMove(game) {
+  function chooseAiMove(game, options = {}) {
     if (game.over) return null;
     const aiColor = 3 - game.userColor;
     const grid = game.grid.map(row => row.slice());
     if (!grid.some(row => row.some(cell => cell !== 0))) return [7, 7];
     const candidates = generateCandidates(grid, aiColor, 12);
+    if (!candidates.length) return null;
     for (const [x, y] of candidates) {
       grid[y][x] = aiColor;
       const wins = hasFiveGrid(grid, x, y, aiColor);
@@ -160,12 +215,33 @@
     }
     const opponentWins = candidates.filter(([x, y]) => scoreMove(grid, x, y, game.userColor) === WIN_SCORE);
     if (opponentWins.length === 1) return opponentWins[0];
-    let best = candidates[0] || null, bestScore = -Infinity;
-    for (const [x, y] of candidates) {
-      grid[y][x] = aiColor;
-      const score = -search(grid, game.userColor, 2, -Infinity, Infinity, [x, y], 1);
-      grid[y][x] = 0;
-      if (score > bestScore) { best = [x, y]; bestScore = score; }
+
+    const context = {
+      nodes: 0,
+      nodeLimit: Math.max(500, Math.min(options.nodeLimit || 14_000, 60_000)),
+      deadline: Date.now() + Math.max(10, Math.min(options.timeBudgetMs || 90, 1_000)),
+      aborted: false,
+      table: new Map()
+    };
+    const maxDepth = Math.max(1, Math.min(options.maxDepth || 6, 8));
+    let best = candidates[0];
+    for (let depth = 1; depth <= maxDepth; depth++) {
+      let iterationBest = null, iterationScore = -Infinity, alpha = -Infinity;
+      const ordered = candidates.slice();
+      const preferredIndex = ordered.findIndex(([x, y]) => x === best[0] && y === best[1]);
+      if (preferredIndex > 0) ordered.unshift(...ordered.splice(preferredIndex, 1));
+      for (const [x, y] of ordered) {
+        if (context.nodes >= context.nodeLimit || Date.now() >= context.deadline) { context.aborted = true; break; }
+        grid[y][x] = aiColor;
+        const score = -search(grid, game.userColor, depth - 1, -Infinity, -alpha, [x, y], 1, context);
+        grid[y][x] = 0;
+        if (context.aborted) break;
+        if (score > iterationScore) { iterationScore = score; iterationBest = [x, y]; }
+        if (score > alpha) alpha = score;
+      }
+      if (context.aborted || !iterationBest) break;
+      best = iterationBest;
+      if (iterationScore >= WIN_SCORE - 10) break;
     }
     return best;
   }
@@ -288,3 +364,4 @@
 
   return { SIZE, createGame, hasFive, playMove, chooseAiMove, undoTurn, mount };
 });
+
