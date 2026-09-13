@@ -288,7 +288,3 @@
 
   return { SIZE, createGame, hasFive, playMove, chooseAiMove, undoTurn, mount };
 });
-
-
-
-
